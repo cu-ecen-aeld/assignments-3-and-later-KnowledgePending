@@ -124,4 +124,4 @@ find . | cpio -H newc -ov --owner root:root > ../initramfs.cpio
 cd ${OUTDIR}
 gzip -f initramfs.cpio
 
-cp /tmp/aeld/linux-stable/arch/arm64/boot/Image /tmp/aeld/
+cp ${OUTDIR}/linux-stable/arch/arm64/boot/Image ${OUTDIR}/

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.2.3)
+cmake_minimum_required(VERSION 3.5)
 project(aesd-assignments)
 # A list of all automated test source files
 # At minimum it should include the files in the test/assignmentX directory

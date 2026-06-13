@@ -8,9 +8,11 @@
 #include <arpa/inet.h>
 #include <syslog.h>
 #include <signal.h>
+#include <errno.h>
 
-#define PORT 9000
-#define BUF_SIZE 1024
+#define PORT       9000
+#define READ_CHUNK 1024
+#define DATA_FILE  "/var/tmp/aesdsocketdata"
 
 static volatile sig_atomic_t stop = 0;
 
@@ -20,6 +22,34 @@ static void handle_signal(int sig)
     stop = 1;
 }
 
+static int send_all(int fd, const char *data, size_t len)
+{
+    size_t sent = 0;
+    while (sent < len)
+    {
+        ssize_t s = send(fd, data + sent, len - sent, 0);
+        if (s < 0) { if (errno == EINTR) continue; return -1; }
+        if (s == 0) return -1;
+        sent += (size_t)s;
+    }
+    return 0;
+}
+
+static int append_and_dump(FILE *fp, int client_fd, const char *data, size_t len)
+{
+    if (fwrite(data, 1, len, fp) != len) return -1;
+    if (fflush(fp) != 0) return -1;
+
+    if (fseek(fp, 0, SEEK_SET) != 0) return -1;
+    clearerr(fp);
+
+    char out[READ_CHUNK];
+    size_t r;
+    while ((r = fread(out, 1, sizeof(out), fp)) > 0)
+        if (send_all(client_fd, out, r) != 0) return -1;
+    return 0;
+}
+
 int main(void)
 {
     openlog("aesdsocket", LOG_PID, LOG_USER);
@@ -27,123 +57,91 @@ int main(void)
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handle_signal;
-    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    /* IMPORTANT: use a+ not ab+ */
-    FILE *fp = fopen("/var/tmp/aesdsocketdata", "a+");
-    if (!fp)
-    {
-        perror("fopen");
-        return EXIT_FAILURE;
-    }
+    FILE *fp = fopen(DATA_FILE, "a+");
+    if (!fp) { perror("fopen"); return EXIT_FAILURE; }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0)
-    {
-        perror("socket");
-        return EXIT_FAILURE;
-    }
+    if (server_fd < 0) { perror("socket"); fclose(fp); return EXIT_FAILURE; }
 
     int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT,
-               &opt, sizeof(opt));
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-
-    addr.sin_family = AF_INET;
+    addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(PORT);
+    addr.sin_port        = htons(PORT);
 
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-    {
-        perror("bind");
-        return EXIT_FAILURE;
-    }
+    { perror("bind"); close(server_fd); fclose(fp); return EXIT_FAILURE; }
 
     if (listen(server_fd, 5) < 0)
-    {
-        perror("listen");
-        return EXIT_FAILURE;
-    }
-
-    char client_ip[INET_ADDRSTRLEN];
+    { perror("listen"); close(server_fd); fclose(fp); return EXIT_FAILURE; }
 
     while (!stop)
     {
-        socklen_t len = sizeof(addr);
+        struct sockaddr_in caddr;
+        socklen_t len = sizeof(caddr);
 
-        int client_fd = accept(server_fd, (struct sockaddr *)&addr, &len);
+        int client_fd = accept(server_fd, (struct sockaddr *)&caddr, &len);
         if (client_fd < 0)
         {
-            if (stop) break;
+            if (stop || errno == EINTR) break;
             perror("accept");
             continue;
         }
 
-        inet_ntop(AF_INET, &addr.sin_addr, client_ip, sizeof(client_ip));
+        char client_ip[INET_ADDRSTRLEN] = {0};
+        inet_ntop(AF_INET, &caddr.sin_addr, client_ip, sizeof(client_ip));
         syslog(LOG_DEBUG, "Accepted connection from %s", client_ip);
 
-        char buf[BUF_SIZE];
+        size_t cap  = READ_CHUNK;
         size_t used = 0;
-        int done = 0;
+        char  *buf  = malloc(cap);
+        if (!buf) { close(client_fd); continue; }
 
-        while (!done && !stop)
+        while (!stop)
         {
-            ssize_t n = read(client_fd, buf + used, sizeof(buf) - used);
-
-            if (n <= 0)
-                break;
-
-            used += n;
-
-            char *nl = memchr(buf, '\n', used);
-            if (!nl)
-                continue;
-
-            size_t packet_len = nl - buf + 1;
-
-            /* append full packet */
-            fwrite(buf, 1, packet_len, fp);
-            fflush(fp);
-
-            /* IMPORTANT FIX: reset stream state before reading */
-            fflush(fp);
-            fseek(fp, 0, SEEK_SET);
-            clearerr(fp);
-
-            char out[BUF_SIZE];
-            size_t r;
-
-            while ((r = fread(out, 1, sizeof(out), fp)) > 0)
+            if (used == cap)
             {
-                size_t sent = 0;
-
-                while (sent < r)
-                {
-                    ssize_t s = send(client_fd, out + sent, r - sent, 0);
-                    if (s <= 0)
-                    {
-                        close(client_fd);
-                        goto cleanup;
-                    }
-                    sent += s;
-                }
+                size_t ncap = cap * 2;
+                char *nb = realloc(buf, ncap);
+                if (!nb) break;
+                buf = nb;
+                cap = ncap;
             }
 
-            done = 1;
+            ssize_t n = read(client_fd, buf + used, cap - used);
+            if (n < 0) { if (errno == EINTR) continue; break; }
+            if (n == 0) break;
+            used += (size_t)n;
+
+            for (;;)
+            {
+                char *nl = memchr(buf, '\n', used);
+                if (!nl) break;
+
+                size_t pkt = (size_t)(nl - buf) + 1;
+                if (append_and_dump(fp, client_fd, buf, pkt) != 0)
+                    goto drop_client;
+
+                memmove(buf, buf + pkt, used - pkt);
+                used -= pkt;
+            }
         }
 
+    drop_client:
+        free(buf);
         close(client_fd);
         syslog(LOG_DEBUG, "Closed connection from %s", client_ip);
     }
 
-cleanup:
     close(server_fd);
     fclose(fp);
-    unlink("/var/tmp/aesdsocketdata");
+    unlink(DATA_FILE);
     closelog();
-
     return 0;
 }

@@ -7,16 +7,34 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <syslog.h>
+#include <signal.h>
 
 #define SERVER_PORT 9000
 #define READ_BUF_SIZE 1024
 #define ACCUM_BUF_SIZE 8192
+static volatile sig_atomic_t exit_requested = 0;
+
+static void handle_int_term_signal(int sig_no, siginfo_t *info, void *context)
+{
+    (void)sig_no;
+    (void)info;
+    (void)context;
+
+    exit_requested = 1;
+}
 
 int main(void)
 {
     int ret = EXIT_FAILURE;
+    struct sigaction sig_action;
+    memset(&sig_action, 0, sizeof(sig_action));
+    sig_action.sa_sigaction = handle_int_term_signal;
+    sig_action.sa_flags = SA_SIGINFO;
+    sigemptyset(&sig_action.sa_mask);
+    sigaction(SIGINT, &sig_action, 0);
     openlog("aesdsocket", LOG_PID, LOG_USER);
-    FILE *fp = fopen("/var/tmp/aesdsocketdata", "ab+");
+    FILE *fp = NULL;
+    fp = fopen("/var/tmp/aesdsocketdata", "ab+");
 
     if (fp == NULL)
     {
@@ -24,7 +42,8 @@ int main(void)
         goto cleanup;
     }
 
-    int server_fd, new_socket = -1;
+    int server_fd = -1;
+    int new_socket = -1;
     struct sockaddr_in address;
     socklen_t addrlen = sizeof(address);
     int opt = 1;
@@ -92,6 +111,11 @@ int main(void)
 
     for (;;)
     {
+        if (exit_requested)
+        {
+            syslog(LOG_DEBUG, "Caught signal, exiting");
+            break;
+        }
         ssize_t n = read(new_socket,
                          read_buf,
                          sizeof(read_buf));
@@ -156,10 +180,16 @@ int main(void)
     size_t bytes_read;
 
     while ((bytes_read = fread(send_buf,
-                            1,
-                            sizeof(send_buf),
-                            fp)) > 0)
+                               1,
+                               sizeof(send_buf),
+                               fp)) > 0)
     {
+        if (exit_requested)
+        {
+            syslog(LOG_DEBUG, "Caught signal, exiting");
+            break;
+        }
+
         size_t total_sent = 0;
 
         while (total_sent < bytes_read)
@@ -186,11 +216,12 @@ int main(void)
            client_ip);
 
     fclose(fp);
+    unlink("/var/tmp/aesdsocketdata");
     closelog();
 
     ret = EXIT_SUCCESS;
 
-    cleanup:
+cleanup:
 
     if (new_socket >= 0)
     {

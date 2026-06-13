@@ -9,6 +9,8 @@
 #include <syslog.h>
 #include <signal.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #define PORT       9000
 #define READ_CHUNK 1024
@@ -50,8 +52,45 @@ static int append_and_dump(FILE *fp, int client_fd, const char *data, size_t len
     return 0;
 }
 
-int main(void)
+static void daemonize(void)
 {
+    pid_t pid = fork();
+    if (pid < 0) { perror("fork"); exit(EXIT_FAILURE); }
+    if (pid > 0) exit(EXIT_SUCCESS);   /* parent exits */
+
+    if (setsid() < 0) { perror("setsid"); exit(EXIT_FAILURE); }
+
+    signal(SIGCHLD, SIG_IGN);
+    signal(SIGHUP,  SIG_IGN);
+
+    umask(0);
+    if (chdir("/") < 0) { perror("chdir"); exit(EXIT_FAILURE); }
+
+    int fd = open("/dev/null", O_RDWR);
+    if (fd >= 0)
+    {
+        dup2(fd, STDIN_FILENO);
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        if (fd > STDERR_FILENO) close(fd);
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    int daemon_mode = 0;
+    int c;
+    while ((c = getopt(argc, argv, "d")) != -1)
+    {
+        switch (c)
+        {
+            case 'd': daemon_mode = 1; break;
+            default:
+                fprintf(stderr, "Usage: %s [-d]\n", argv[0]);
+                return EXIT_FAILURE;
+        }
+    }
+
     openlog("aesdsocket", LOG_PID, LOG_USER);
 
     struct sigaction sa;
@@ -81,6 +120,9 @@ int main(void)
     if (listen(server_fd, 5) < 0)
     { perror("listen"); close(server_fd); fclose(fp); return EXIT_FAILURE; }
 
+    /* Daemonize only after we have successfully bound to PORT 9000. */
+    if (daemon_mode) daemonize();
+
     while (!stop)
     {
         struct sockaddr_in caddr;
@@ -98,6 +140,7 @@ int main(void)
         inet_ntop(AF_INET, &caddr.sin_addr, client_ip, sizeof(client_ip));
         syslog(LOG_DEBUG, "Accepted connection from %s", client_ip);
 
+        /* Dynamic, growable per-connection receive buffer. */
         size_t cap  = READ_CHUNK;
         size_t used = 0;
         char  *buf  = malloc(cap);
@@ -145,3 +188,4 @@ int main(void)
     closelog();
     return 0;
 }
+

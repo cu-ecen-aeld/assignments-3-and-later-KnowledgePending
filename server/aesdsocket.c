@@ -41,13 +41,11 @@ int main(void)
         perror("fopen");
         goto cleanup;
     }
-
     int server_fd = -1;
     int new_socket = -1;
     struct sockaddr_in address;
     socklen_t addrlen = sizeof(address);
     int opt = 1;
-
     memset(&address, 0, sizeof(address));
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
@@ -82,133 +80,136 @@ int main(void)
         goto cleanup;
     }
 
-    new_socket = accept(
-        server_fd,
-        (struct sockaddr *)&address,
-        &addrlen);
-
-    if (new_socket < 0)
-    {
-        perror("accept failed");
-        goto cleanup;
-    }
-
     char client_ip[INET_ADDRSTRLEN];
-
-    inet_ntop(AF_INET,
-              &address.sin_addr,
-              client_ip,
-              sizeof(client_ip));
-
-    syslog(LOG_DEBUG,
-           "Accepted connection from \"%s\"",
-           client_ip);
-
-    // recieving data
-    char read_buf[READ_BUF_SIZE];
-    char accum[ACCUM_BUF_SIZE];
-    size_t accum_len = 0;
-
-    for (;;)
+    while (!exit_requested)
     {
-        if (exit_requested)
-        {
-            syslog(LOG_DEBUG, "Caught signal, exiting");
-            break;
-        }
-        ssize_t n = read(new_socket,
-                         read_buf,
-                         sizeof(read_buf));
 
-        if (n < 0)
+        new_socket = accept(
+            server_fd,
+            (struct sockaddr *)&address,
+            &addrlen);
+
+        if (new_socket < 0)
         {
-            perror("read");
-            break;
+            perror("accept failed");
+            goto cleanup;
         }
 
-        if (n == 0)
+        inet_ntop(AF_INET,
+                  &address.sin_addr,
+                  client_ip,
+                  sizeof(client_ip));
+
+        syslog(LOG_DEBUG,
+               "Accepted connection from \"%s\"",
+               client_ip);
+
+        // recieving data
+        char read_buf[READ_BUF_SIZE];
+        char accum[ACCUM_BUF_SIZE];
+        size_t accum_len = 0;
+
+        for (;;)
         {
-            /* client disconnected */
-            break;
-        }
-
-        if (accum_len + n > sizeof(accum))
-        {
-            fprintf(stderr, "message too large\n");
-            break;
-        }
-
-        memcpy(accum + accum_len, read_buf, n);
-        accum_len += n;
-
-        char *line_start = accum;
-        char *newline;
-
-        while ((newline = memchr(line_start,
-                                 '\n',
-                                 accum + accum_len - line_start)) != NULL)
-        {
-            size_t line_len = newline - line_start + 1;
-
-            fwrite(line_start, 1, line_len, fp);
-            fflush(fp);
-
-            line_start = newline + 1;
-        }
-
-        size_t remaining = accum + accum_len - line_start;
-
-        memmove(accum, line_start, remaining);
-        accum_len = remaining;
-    }
-
-    if (accum_len > 0)
-    {
-        fwrite(accum, 1, accum_len, fp);
-    }
-
-    // sending data
-    fflush(fp);
-
-    if (fseek(fp, 0, SEEK_SET) != 0)
-    {
-        perror("fseek");
-        goto cleanup;
-    }
-
-    char send_buf[1024];
-    size_t bytes_read;
-
-    while ((bytes_read = fread(send_buf,
-                               1,
-                               sizeof(send_buf),
-                               fp)) > 0)
-    {
-        if (exit_requested)
-        {
-            syslog(LOG_DEBUG, "Caught signal, exiting");
-            break;
-        }
-
-        size_t total_sent = 0;
-
-        while (total_sent < bytes_read)
-        {
-            ssize_t sent = send(new_socket,
-                                send_buf + total_sent,
-                                bytes_read - total_sent,
-                                0);
-
-            if (sent < 0)
+            if (exit_requested)
             {
-                perror("send");
-                goto cleanup;
+                syslog(LOG_DEBUG, "Caught signal, exiting");
+                break;
+            }
+            ssize_t n = read(new_socket,
+                             read_buf,
+                             sizeof(read_buf));
+
+            if (n < 0)
+            {
+                perror("read");
+                break;
             }
 
-            total_sent += sent;
+            if (n == 0)
+            {
+                /* client disconnected */
+                break;
+            }
+
+            if (accum_len + n > sizeof(accum))
+            {
+                fprintf(stderr, "message too large\n");
+                break;
+            }
+
+            memcpy(accum + accum_len, read_buf, n);
+            accum_len += n;
+
+            char *line_start = accum;
+            char *newline;
+
+            while ((newline = memchr(line_start,
+                                     '\n',
+                                     accum + accum_len - line_start)) != NULL)
+            {
+                size_t line_len = newline - line_start + 1;
+
+                fwrite(line_start, 1, line_len, fp);
+                fflush(fp);
+
+                line_start = newline + 1;
+            }
+
+            size_t remaining = accum + accum_len - line_start;
+
+            memmove(accum, line_start, remaining);
+            accum_len = remaining;
         }
+
+        if (accum_len > 0)
+        {
+            fwrite(accum, 1, accum_len, fp);
+        }
+
+        // sending data
+        fflush(fp);
+
+        if (fseek(fp, 0, SEEK_SET) != 0)
+        {
+            perror("fseek");
+            goto cleanup;
+        }
+
+        char send_buf[1024];
+        size_t bytes_read;
+
+        while ((bytes_read = fread(send_buf,
+                                   1,
+                                   sizeof(send_buf),
+                                   fp)) > 0)
+        {
+            if (exit_requested)
+            {
+                syslog(LOG_DEBUG, "Caught signal, exiting");
+                break;
+            }
+
+            size_t total_sent = 0;
+
+            while (total_sent < bytes_read)
+            {
+                ssize_t sent = send(new_socket,
+                                    send_buf + total_sent,
+                                    bytes_read - total_sent,
+                                    0);
+
+                if (sent < 0)
+                {
+                    perror("send");
+                    goto cleanup;
+                }
+
+                total_sent += sent;
+            }
+        }
+        ret = EXIT_SUCCESS;
     }
-    ret = EXIT_SUCCESS;
 
 cleanup:
 

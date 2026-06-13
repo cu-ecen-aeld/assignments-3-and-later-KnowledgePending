@@ -14,16 +14,17 @@
 
 int main(void)
 {
+    int ret = EXIT_FAILURE;
     openlog("aesdsocket", LOG_PID, LOG_USER);
     FILE *fp = fopen("/var/tmp/aesdsocketdata", "ab+");
 
     if (fp == NULL)
     {
         perror("fopen");
-        exit(EXIT_FAILURE);
+        goto cleanup;
     }
 
-    int server_fd, new_socket;
+    int server_fd, new_socket = -1;
     struct sockaddr_in address;
     socklen_t addrlen = sizeof(address);
     int opt = 1;
@@ -33,7 +34,7 @@ int main(void)
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
         perror("socket failed");
-        exit(EXIT_FAILURE);
+        goto cleanup;
     }
 
     if (setsockopt(server_fd, SOL_SOCKET,
@@ -41,7 +42,7 @@ int main(void)
                    &opt, sizeof(opt)) < 0)
     {
         perror("setsockopt failed");
-        exit(EXIT_FAILURE);
+        goto cleanup;
     }
 
     address.sin_family = AF_INET;
@@ -53,13 +54,13 @@ int main(void)
              sizeof(address)) < 0)
     {
         perror("bind failed");
-        exit(EXIT_FAILURE);
+        goto cleanup;
     }
 
     if (listen(server_fd, 3) < 0)
     {
         perror("listen failed");
-        exit(EXIT_FAILURE);
+        goto cleanup;
     }
 
     new_socket = accept(
@@ -70,7 +71,7 @@ int main(void)
     if (new_socket < 0)
     {
         perror("accept failed");
-        exit(EXIT_FAILURE);
+        goto cleanup;
     }
 
     char client_ip[INET_ADDRSTRLEN];
@@ -151,5 +152,26 @@ int main(void)
     fclose(fp);
     closelog();
 
-    return 0;
+    ret = EXIT_SUCCESS;
+
+    cleanup:
+
+    if (new_socket >= 0)
+    {
+        close(new_socket);
+    }
+
+    if (server_fd >= 0)
+    {
+        close(server_fd);
+    }
+
+    if (fp != NULL)
+    {
+        fclose(fp);
+    }
+
+    closelog();
+
+    return ret;
 }

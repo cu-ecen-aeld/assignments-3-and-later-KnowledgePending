@@ -9,34 +9,29 @@
 #include <syslog.h>
 #include <signal.h>
 
-#define SERVER_PORT 9000
-#define READ_BUF_SIZE 1024
-#define ACCUM_BUF_SIZE 8192
+#define PORT 9000
+#define BUF_SIZE 1024
 
-static volatile sig_atomic_t exit_requested = 0;
+static volatile sig_atomic_t stop = 0;
 
-static void handle_int_term_signal(int sig_no, siginfo_t *info, void *context)
+static void handle_signal(int sig)
 {
-    (void)sig_no;
-    (void)info;
-    (void)context;
-    exit_requested = 1;
+    (void)sig;
+    stop = 1;
 }
 
 int main(void)
 {
-    int ret = EXIT_FAILURE;
-
-    struct sigaction sig_action;
-    memset(&sig_action, 0, sizeof(sig_action));
-    sig_action.sa_sigaction = handle_int_term_signal;
-    sig_action.sa_flags = SA_SIGINFO;
-    sigemptyset(&sig_action.sa_mask);
-    sigaction(SIGINT, &sig_action, 0);
-
     openlog("aesdsocket", LOG_PID, LOG_USER);
 
-    FILE *fp = fopen("/var/tmp/aesdsocketdata", "ab+");
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_signal;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    /* IMPORTANT: use a+ not ab+ */
+    FILE *fp = fopen("/var/tmp/aesdsocketdata", "a+");
     if (!fp)
     {
         perror("fopen");
@@ -47,148 +42,108 @@ int main(void)
     if (server_fd < 0)
     {
         perror("socket");
-        goto cleanup;
+        return EXIT_FAILURE;
     }
 
     int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT,
-                   &opt, sizeof(opt)) < 0)
-    {
-        perror("setsockopt");
-        goto cleanup;
-    }
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT,
+               &opt, sizeof(opt));
 
-    struct sockaddr_in address;
-    memset(&address, 0, sizeof(address));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
 
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_ANY);
-    address.sin_port = htons(SERVER_PORT);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(PORT);
 
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0)
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
         perror("bind");
-        goto cleanup;
+        return EXIT_FAILURE;
     }
 
-    if (listen(server_fd, 3) < 0)
+    if (listen(server_fd, 5) < 0)
     {
         perror("listen");
-        goto cleanup;
+        return EXIT_FAILURE;
     }
 
     char client_ip[INET_ADDRSTRLEN];
 
-    while (!exit_requested)
+    while (!stop)
     {
-        socklen_t addrlen = sizeof(address);
+        socklen_t len = sizeof(addr);
 
-        int new_socket = accept(server_fd,
-                                 (struct sockaddr *)&address,
-                                 &addrlen);
-
-        if (new_socket < 0)
+        int client_fd = accept(server_fd, (struct sockaddr *)&addr, &len);
+        if (client_fd < 0)
         {
-            if (exit_requested)
-                break;
+            if (stop) break;
             perror("accept");
             continue;
         }
 
-        inet_ntop(AF_INET, &address.sin_addr,
-                  client_ip, sizeof(client_ip));
+        inet_ntop(AF_INET, &addr.sin_addr, client_ip, sizeof(client_ip));
+        syslog(LOG_DEBUG, "Accepted connection from %s", client_ip);
 
-        syslog(LOG_DEBUG, "Accepted connection from \"%s\"", client_ip);
-
-        char read_buf[READ_BUF_SIZE];
-        char accum[ACCUM_BUF_SIZE];
-        size_t accum_len = 0;
-
+        char buf[BUF_SIZE];
+        size_t used = 0;
         int done = 0;
 
-        while (!done && !exit_requested)
+        while (!done && !stop)
         {
-            ssize_t n = read(new_socket, read_buf, sizeof(read_buf));
+            ssize_t n = read(client_fd, buf + used, sizeof(buf) - used);
 
             if (n <= 0)
                 break;
 
-            if (accum_len + n > sizeof(accum))
+            used += n;
+
+            char *nl = memchr(buf, '\n', used);
+            if (!nl)
+                continue;
+
+            size_t packet_len = nl - buf + 1;
+
+            /* append full packet */
+            fwrite(buf, 1, packet_len, fp);
+            fflush(fp);
+
+            /* IMPORTANT FIX: reset stream state before reading */
+            fflush(fp);
+            fseek(fp, 0, SEEK_SET);
+            clearerr(fp);
+
+            char out[BUF_SIZE];
+            size_t r;
+
+            while ((r = fread(out, 1, sizeof(out), fp)) > 0)
             {
-                fprintf(stderr, "message too large\n");
-                break;
-            }
+                size_t sent = 0;
 
-            memcpy(accum + accum_len, read_buf, n);
-            accum_len += n;
-
-            char *start = accum;
-            char *newline;
-
-            while ((newline = memchr(start, '\n',
-                   accum + accum_len - start)) != NULL)
-            {
-                size_t len = newline - start + 1;
-
-                // append packet
-                fwrite(start, 1, len, fp);
-                fflush(fp);
-
-                // rewind and send full file
-                fflush(fp);
-                fseek(fp, 0, SEEK_SET);
-
-                char send_buf[1024];
-                size_t bytes;
-
-                while ((bytes = fread(send_buf, 1, sizeof(send_buf), fp)) > 0)
+                while (sent < r)
                 {
-                    size_t sent_total = 0;
-
-                    while (sent_total < bytes)
+                    ssize_t s = send(client_fd, out + sent, r - sent, 0);
+                    if (s <= 0)
                     {
-                        ssize_t sent = send(new_socket,
-                                            send_buf + sent_total,
-                                            bytes - sent_total,
-                                            0);
-
-                        if (sent < 0)
-                        {
-                            perror("send");
-                            close(new_socket);
-                            goto cleanup;
-                        }
-
-                        sent_total += sent;
+                        close(client_fd);
+                        goto cleanup;
                     }
+                    sent += s;
                 }
-
-                done = 1;
-
-                // consume processed data
-                start = newline + 1;
-                break;
             }
 
-            // shift leftover
-            size_t remaining = accum + accum_len - start;
-            memmove(accum, start, remaining);
-            accum_len = remaining;
+            done = 1;
         }
 
-        close(new_socket);
-        syslog(LOG_DEBUG, "Closed connection from \"%s\"", client_ip);
+        close(client_fd);
+        syslog(LOG_DEBUG, "Closed connection from %s", client_ip);
     }
 
 cleanup:
-    if (server_fd >= 0)
-        close(server_fd);
-
-    if (fp)
-        fclose(fp);
-
+    close(server_fd);
+    fclose(fp);
     unlink("/var/tmp/aesdsocketdata");
     closelog();
 
-    return ret;
+    return 0;
 }

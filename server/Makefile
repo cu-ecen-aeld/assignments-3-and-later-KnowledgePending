@@ -1,7 +1,7 @@
 CROSS_COMPILE ?=
 
 CC := $(CROSS_COMPILE)gcc
-CFLAGS := -Wall -Werror -Wpedantic
+CFLAGS := -Wall -Werror -Wpedantic -O3
 
 TARGET := aesdsocket
 SRC := aesdsocket.c

@@ -1,0 +1,26 @@
+#!/bin/sh
+# Start/stop script for the aesdsocket daemon.
+
+DAEMON=/usr/bin/aesdsocket
+NAME=aesdsocket
+
+case "$1" in
+    start)
+        echo "Starting ${NAME}"
+        start-stop-daemon --start --name ${NAME} --exec ${DAEMON} -- -d
+        ;;
+    stop)
+        echo "Stopping ${NAME}"
+        start-stop-daemon --stop --name ${NAME} --signal TERM
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

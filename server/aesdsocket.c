@@ -208,17 +208,6 @@ int main(void)
             total_sent += sent;
         }
     }
-
-    close(new_socket);
-    close(server_fd);
-    syslog(LOG_DEBUG,
-           "Closed connection from \"%s\"",
-           client_ip);
-
-    fclose(fp);
-    unlink("/var/tmp/aesdsocketdata");
-    closelog();
-
     ret = EXIT_SUCCESS;
 
 cleanup:
@@ -232,12 +221,15 @@ cleanup:
     {
         close(server_fd);
     }
+    syslog(LOG_DEBUG,
+           "Closed connection from \"%s\"",
+           client_ip);
 
     if (fp != NULL)
     {
         fclose(fp);
     }
-
+    unlink("/var/tmp/aesdsocketdata");
     closelog();
 
     return ret;

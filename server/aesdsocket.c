@@ -143,6 +143,42 @@ int main(void)
         fwrite(accum, 1, accum_len, fp);
     }
 
+    // sending data
+    fflush(fp);
+
+    if (fseek(fp, 0, SEEK_SET) != 0)
+    {
+        perror("fseek");
+        goto cleanup;
+    }
+
+    char send_buf[1024];
+    size_t bytes_read;
+
+    while ((bytes_read = fread(send_buf,
+                            1,
+                            sizeof(send_buf),
+                            fp)) > 0)
+    {
+        size_t total_sent = 0;
+
+        while (total_sent < bytes_read)
+        {
+            ssize_t sent = send(new_socket,
+                                send_buf + total_sent,
+                                bytes_read - total_sent,
+                                0);
+
+            if (sent < 0)
+            {
+                perror("send");
+                goto cleanup;
+            }
+
+            total_sent += sent;
+        }
+    }
+
     close(new_socket);
     close(server_fd);
     syslog(LOG_DEBUG,
